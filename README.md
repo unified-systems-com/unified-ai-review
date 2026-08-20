@@ -1,2 +1,116 @@
-# unified-ai-review
-Unified AI Review — two-stage, fork-covering AI PR review machinery. Bring your own prompts.
+# Unified AI Review
+
+Two-stage, fork-covering AI code review for GitHub pull requests — machinery only, **bring your
+own prompts**.
+
+Most AI review products make you choose: hand a vendor's GitHub App write access to your code, or
+lose coverage of contributor (fork) PRs because GitHub withholds repository secrets from fork
+runs. Unified AI Review refuses both: it runs entirely in **your** CI under permissions **you**
+author, reviews **every** PR including forks, and no vendor holds any key to your org.
+
+## How it works
+
+```
+  PR opened (fork or not)
+       │
+       ▼
+  STAGE 1 — capture  (pull_request, UNPRIVILEGED)
+  No secrets, no write permissions. Computes the PR diff
+  and uploads it as an artifact. Data, never code.
+       │
+       ▼
+  STAGE 2 — review  (workflow_run, PRIVILEGED, base-repo context)
+  Holds the vendor API keys. NEVER checks out or executes PR
+  content — the diff is consumed as text. Resolves PR identity
+  from its own event context, never from the artifact. Runs
+  deterministic screens (binary/image additions, invisible
+  Unicode, hidden comments, opaque blobs) plus one job per
+  model seat, then posts a single advisory comment.
+```
+
+The invariant: **the privileged stage treats the PR as a document, never as a program.** A prompt
+injection in a PR can, at worst, produce a wrong comment — no seat holds any write path to code.
+Seats fail loud: a reviewer that produces no verdict is a red job plus an explicit absence marker,
+never a silent skip. Injection indicators fail the run red and raise an out-of-band alert issue.
+
+## Consuming it
+
+Two thin shims in your repo. Pin everything by full commit SHA — the machinery, and your prompts.
+
+`.github/workflows/ai-review-capture.yml`:
+
+```yaml
+name: AI review capture
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions: {}
+jobs:
+  capture:
+    permissions:
+      contents: read
+    uses: unified-systems-com/unified-ai-review/.github/workflows/capture.yml@<MACHINERY_SHA>
+```
+
+`.github/workflows/ai-review.yml`:
+
+```yaml
+name: AI review
+on:
+  workflow_run:
+    workflows: ["AI review capture"]
+    types: [completed]
+concurrency:
+  group: ai-review-run-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+permissions: {}
+jobs:
+  review:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: unified-systems-com/unified-ai-review/.github/workflows/review.yml@<MACHINERY_SHA>
+    with:
+      prompts-repo: your-org/your-prompts-repo
+      prompts-ref: <PROMPTS_SHA>
+      prompt-pack: security
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+```
+
+Your prompts repo follows one contract: `packs/<name>/prompt.md`. The reference packs live in
+[unified-ai-review-prompts](https://github.com/unified-systems-com/unified-ai-review-prompts).
+Because the shim (base branch) pins the prompts SHA, a PR under review can never edit the
+instructions being applied to it — and a prompt change in your repo is a reviewable pin bump.
+
+### Inputs (`review.yml`)
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `prompts-repo` | `unified-systems-com/unified-ai-review-prompts` | Repo holding prompt packs |
+| `prompts-ref` | *(required)* | FULL commit SHA of the prompts repo |
+| `prompt-pack` | `security` | Pack under `packs/` to apply |
+| `openai-model` | `gpt-5.5` | Model id for the OpenAI seat |
+| `xai-model` | `grok-4.6` | Model id for the xAI seat |
+| `diff-artifact` | `unified-ai-review-diff` | Artifact name from capture |
+
+Secrets: `OPENAI_API_KEY`, `XAI_API_KEY` — mint them restricted (inference only) in dedicated,
+hard-spend-capped vendor projects.
+
+## Design provenance
+
+Built for and specified by [TAP](https://github.com/unified-systems-com/tap) —
+`specs/spec-cicd-ai-review.md` there is the governing spec (reviewer least privilege, untrusted
+PR content, fail-loud seats, the verdict ledger). Reviews are **advisory**: no bot approval is
+ever load-bearing for a merge.
+
+## License
+
+Apache-2.0. This repository deliberately contains no prompt content — prompts live in their own
+repo under their own licenses.

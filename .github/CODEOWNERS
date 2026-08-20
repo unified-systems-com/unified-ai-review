@@ -1,0 +1,4 @@
+# Reviewer plumbing is code-owned (TAP req-cicd-ai-review-least-privilege-5):
+# every change here requires the owner's explicit review. This machinery reviews
+# other repos' PRs — a change to it is a change to the review itself.
+*   @notgeorge
