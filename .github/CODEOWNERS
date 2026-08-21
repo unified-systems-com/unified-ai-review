@@ -1,4 +1,6 @@
 # Reviewer plumbing is code-owned (TAP req-cicd-ai-review-least-privilege-5):
 # every change here requires the owner's explicit review. This machinery reviews
 # other repos' PRs — a change to it is a change to the review itself.
-*   @notgeorge
+*   @notgeorge @criticalsec
+# @criticalsec is the second-account reviewer (two-account review, TAP req-cicd-ai-review-least-privilege-5);
+# it never authenticates on the dev laptop. GitHub silently ignores unresolvable owners — verify after any access change.
