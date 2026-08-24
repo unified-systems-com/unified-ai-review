@@ -103,6 +103,30 @@ instructions being applied to it — and a prompt change in your repo is a revie
 Secrets: `OPENAI_API_KEY`, `XAI_API_KEY` — mint them restricted (inference only) in dedicated,
 hard-spend-capped vendor projects.
 
+## Consuming these reviews
+
+A posted review only helps if someone reads it — including the suppressed findings. The
+reference implementation of the watch-and-triage pattern is TAP's
+[`scripts/pr-review-triage`](https://github.com/unified-systems-com/tap/blob/main/scripts/pr-review-triage)
+(link, not copy: the canonical version lives in TAP, where its push-workflow spec governs it —
+a vendored copy here would be a drift surface nothing polices).
+
+What it gives an adopter:
+
+- **One-shot mode** — the authoritative read: every review on the PR, with suppressed findings
+  (`<details>` blocks) surfaced for conscious triage rather than silent scroll-past.
+- **`--watch` mode** — one line per event, built to sit under a monitor:
+  `WATCHING` / `REVIEW` / `COMMENT` / `MERGESTATE` / `CHECKFAIL` / `CHECKRECOVERED` /
+  `FETCHFAIL` / `TERMINAL`. Per-check `CHECKFAIL` fires the moment an individual check (a seat
+  run, a scanner, a CI lane) goes red — findings are workable before the full gate resolves.
+  Signatures are edit-aware (position-weighted body digest for reviews, `updatedAt` for
+  comments), and it exits nonzero after 60 consecutive fetch failures rather than watching
+  nothing forever.
+- **Coverage contract, honestly stated**: each event is detected within one comment page; the
+  one-shot read is the authoritative record.
+
+The only thing an adopter tunes is the bot-name regex.
+
 ## Design provenance
 
 Built for and specified by [TAP](https://github.com/unified-systems-com/tap) —
