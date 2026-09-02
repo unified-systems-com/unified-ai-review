@@ -120,8 +120,8 @@ What it gives an adopter:
   `FETCHFAIL` / `TERMINAL`. Per-check `CHECKFAIL` fires the moment an individual check (a seat
   run, a scanner, a CI lane) goes red — findings are workable before the full gate resolves.
   Signatures are edit-aware (position-weighted body digest for reviews, `updatedAt` for
-  comments), and it exits nonzero after 60 consecutive fetch failures rather than watching
-  nothing forever.
+  comments); consecutive fetch failures are reported every tenth one (`FETCHFAIL`) while it
+  keeps retrying, so a watcher never mistakes an auth or rate-limit outage for a quiet PR.
 - **Coverage contract, honestly stated**: each event is detected within one comment page; the
   one-shot read is the authoritative record.
 
