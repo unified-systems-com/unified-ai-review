@@ -73,17 +73,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          prs=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls")
-          # state filter: the commit->pulls list includes CLOSED PRs sharing the head
-          # SHA (a closed PR matched before the open one on tap#94 — [0]-pick was luck).
-          pr=$(echo "$prs" | jq --arg sha "$HEAD_SHA" '[.[] | select(.head.sha == $sha and .state == "open")][0]')
+          # Resolve from the base repo's PR list, not commits/{sha}/pulls: that endpoint
+          # only sees heads that live in $REPO, so every fork PR came back empty and was
+          # never reviewed (unified-ai-review#10). workflow_run.pull_requests is empty for
+          # fork-originated runs too. Match on head SHA AND head repo, both asserted by
+          # the API and the event, so a PR is never matched by SHA alone across repos.
+          # The state filter still matters: closed PRs can share a head SHA (tap#94).
+          match='[.[] | select(.head.sha == $sha and .head.repo.full_name == $repo)][0]'
+          pr=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
+                 | jq -s --arg sha "$HEAD_SHA" --arg repo "$HEAD_REPO" "add | $match")
           if [ "$pr" = "null" ] || [ -z "$pr" ]; then
-            echo "No open PR found for head SHA $HEAD_SHA — nothing to review."
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            # The one legitimate miss: the PR was closed or merged between capture and
+            # review. Anything else is a PR this stage failed to find, and a green run
+            # with no review in it is the failure this job exists to prevent.
+            closed=$(gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
+                       | jq --arg sha "$HEAD_SHA" --arg repo "$HEAD_REPO" "$match")
+            if [ "$closed" != "null" ] && [ -n "$closed" ]; then
+              echo "::notice::PR #$(echo "$closed" | jq -r .number) for $HEAD_REPO@$HEAD_SHA was closed before review — nothing to review."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::No PR found for $HEAD_REPO@$HEAD_SHA in $REPO. Refusing to report a review that did not happen."
+            exit 1
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
           pr_number=$(echo "$pr" | jq -r '.number')
