@@ -20,6 +20,15 @@ on:
         type: number
         required: false
         default: 1024
+      diff-context-lines:
+        description: >-
+          Lines of unchanged context around each change in the captured diff (git's -U). The
+          default of 3 is git's own. A seat judging "is there a guard / a fetch / a definition
+          nearby" cannot see past its hunks, so a larger value removes false absences, at the
+          cost of a bigger diff (which reaches diff-size-cap-kb sooner).
+        type: number
+        required: false
+        default: 3
 
 jobs:
   capture:
@@ -38,9 +47,18 @@ jobs:
       - name: Compute the diff (merge commit vs its base parent)
         env:
           CAP_KB: ${{ inputs.diff-size-cap-kb }}
+          CONTEXT_LINES: ${{ inputs.diff-context-lines }}
         run: |
           set -euo pipefail
-          git diff HEAD^1 HEAD > diff.patch
+          # The input reaches the shell only through this env var, and only after the
+          # integer check below — never interpolated into the script text.
+          case "$CONTEXT_LINES" in
+            ''|*[!0-9]*) echo "::error::diff-context-lines must be a non-negative integer, got '$CONTEXT_LINES'."; exit 1 ;;
+          esac
+          if [ "$CONTEXT_LINES" -gt 200 ]; then
+            echo "::error::diff-context-lines must be at most 200, got $CONTEXT_LINES."; exit 1
+          fi
+          git diff -U"$CONTEXT_LINES" HEAD^1 HEAD > diff.patch
           size=$(wc -c < diff.patch)
           cap=$(( CAP_KB * 1024 ))
           if [ "$size" -gt "$cap" ]; then
