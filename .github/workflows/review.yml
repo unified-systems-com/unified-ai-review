@@ -55,10 +55,11 @@ on:
         description: >-
           Output-token budget per seat. For reasoning models this budget also pays for hidden
           reasoning, so it must sit well above the visible review length: complete tap reviews
-          are at most ~1.5k visible tokens, yet 4000 cut seats off mid-finding.
+          are at most ~1.5k visible tokens, yet 4000 cut seats off mid-finding. OpenAI's reasoning
+          guide recommends reserving at least 25,000 tokens for reasoning plus output.
         type: number
         required: false
-        default: 16000
+        default: 32000
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -385,15 +386,17 @@ jobs:
               text = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
           # The vendor's own completion signal: OpenAI Responses reports status
-          # "incomplete" with incomplete_details.reason; xAI chat completions reports
-          # finish_reason "length". A review that stopped on the output budget ends
+          # "incomplete" with incomplete_details.reason (confirmed in OpenAI's reasoning guide);
+          # xAI chat completions reports finish_reason. A review that stopped on the output budget ends
           # mid-finding with no verdict, and must say so rather than read as complete.
           if seat == "openai":
               cut_reason = ((resp.get("incomplete_details") or {}).get("reason") or "unspecified") \
                   if resp.get("status") == "incomplete" else None
           else:
-              cut_reason = "length" \
-                  if resp.get("choices", [{}])[0].get("finish_reason") == "length" else None
+              # xAI's docs do not list chat-completions finish_reason values, so treat any
+              # reason other than a normal stop as a cut-off and name it in the warning.
+              fr = resp.get("choices", [{}])[0].get("finish_reason")
+              cut_reason = fr if fr not in (None, "", "stop") else None
 
           if not text or not text.strip():
               why = f" (stopped on {cut_reason} before emitting any text — raise max-output-tokens)" if cut_reason else ""
