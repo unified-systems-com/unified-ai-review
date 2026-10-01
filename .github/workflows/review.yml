@@ -390,12 +390,20 @@ jobs:
           # xAI chat completions reports finish_reason. A review that stopped on the output budget ends
           # mid-finding with no verdict, and must say so rather than read as complete.
           if seat == "openai":
-              cut_reason = ((resp.get("incomplete_details") or {}).get("reason") or "unspecified") \
-                  if resp.get("status") == "incomplete" else None
+              # Anything but "completed" is not a finished response; a missing status is
+              # treated the same way so schema drift cannot pass as a complete review.
+              finish = resp.get("status")
+              if finish == "completed":
+                  cut_reason = None
+              elif finish == "incomplete":
+                  cut_reason = (resp.get("incomplete_details") or {}).get("reason") or "unspecified"
+              else:
+                  cut_reason = f"status={finish!r}"
           else:
               # xAI's docs do not list chat-completions finish_reason values, so treat any
               # reason other than a normal stop as a cut-off and name it in the warning.
               fr = resp.get("choices", [{}])[0].get("finish_reason")
+              finish = fr
               cut_reason = fr if fr not in (None, "", "stop") else None
 
           if not text or not text.strip():
@@ -405,11 +413,13 @@ jobs:
 
           if cut_reason:
               print(f"::warning::seat {seat} ({model}) stopped on {cut_reason} at max-output-tokens={max_out}; marking the review incomplete.")
+              # Prepended, not appended: the comment job clips each section from the END, and
+              # the warning must survive that clip.
               text = (
-                  text.rstrip()
-                  + "\n\n> [!WARNING]\n> **REVIEW CUT OFF** — this seat hit its output budget "
+                  "> [!WARNING]\n> **REVIEW CUT OFF** — this seat hit its output budget "
                   + f"({max_out} tokens, stopped on `{cut_reason}`). Findings after this point and the "
-                  + "verdict were not produced; this is a partial review, not a clean one.\n"
+                  + "verdict were not produced; this is a partial review, not a clean one.\n\n"
+                  + text.lstrip()
               )
 
           os.makedirs("out", exist_ok=True)
@@ -426,6 +436,7 @@ jobs:
                   "head_sha": trusted["head_sha"],
                   "prompt_pack": pack,
                   "status": "incomplete" if cut_reason else "ok",
+                  "finish": finish,
                   "review_markdown": text,
               },
               open("out/verdict.json", "w", encoding="utf-8"),
