@@ -103,6 +103,13 @@ instructions being applied to it — and a prompt change in your repo is a revie
 Secrets: `OPENAI_API_KEY`, `XAI_API_KEY` — mint them restricted (inference only) in dedicated,
 hard-spend-capped vendor projects.
 
+### Inputs (`capture.yml`)
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `diff-size-cap-kb` | `1024` | Diffs larger than this are truncated with a loud marker |
+| `diff-context-lines` | `3` | Unchanged lines of context around each change (git's `-U`, 0–200). Larger values let a seat see across hunk gaps, at the cost of a bigger diff |
+
 ## Consuming these reviews
 
 A posted review only helps if someone reads it — including the suppressed findings. The
