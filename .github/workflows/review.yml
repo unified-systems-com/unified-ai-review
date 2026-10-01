@@ -51,6 +51,14 @@ on:
         type: string
         required: false
         default: unified-ai-review-diff
+      max-output-tokens:
+        description: >-
+          Output-token budget per seat. For reasoning models this budget also pays for hidden
+          reasoning, so it must sit well above the visible review length: complete tap reviews
+          are at most ~1.5k visible tokens, yet 4000 cut seats off mid-finding.
+        type: number
+        required: false
+        default: 16000
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -286,6 +294,7 @@ jobs:
           MODEL: ${{ matrix.seat == 'openai' && inputs.openai-model || inputs.xai-model }}
           API_KEY: ${{ matrix.seat == 'openai' && secrets.OPENAI_API_KEY || secrets.XAI_API_KEY }}
           PACK: ${{ inputs.prompt-pack }}
+          MAX_OUT: ${{ inputs.max-output-tokens }}
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
@@ -303,6 +312,13 @@ jobs:
           model = os.environ["MODEL"]
           key = os.environ["API_KEY"]
           pack = os.environ["PACK"]
+          try:
+              max_out = int(os.environ["MAX_OUT"])
+          except ValueError:
+              max_out = 0
+          if not 1000 <= max_out <= 128000:
+              print("::error::max-output-tokens must be an integer between 1000 and 128000.")
+              sys.exit(1)
 
           diff = open("diff/diff.patch", encoding="utf-8", errors="replace").read()
           trusted = json.load(open("ctx/trusted.json"))
@@ -323,10 +339,10 @@ jobs:
           if seat == "openai":
               url = "https://api.openai.com/v1/responses"
               payload = {"model": model, "instructions": system_prompt, "input": user_input,
-                         "max_output_tokens": 4000}
+                         "max_output_tokens": max_out}
           else:
               url = "https://api.x.ai/v1/chat/completions"
-              payload = {"model": model, "max_tokens": 4000,
+              payload = {"model": model, "max_tokens": max_out,
                          "messages": [{"role": "system", "content": system_prompt},
                                       {"role": "user", "content": user_input}]}
 
@@ -368,9 +384,30 @@ jobs:
           else:
               text = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
+          # The vendor's own completion signal: OpenAI Responses reports status
+          # "incomplete" with incomplete_details.reason; xAI chat completions reports
+          # finish_reason "length". A review that stopped on the output budget ends
+          # mid-finding with no verdict, and must say so rather than read as complete.
+          if seat == "openai":
+              cut_reason = ((resp.get("incomplete_details") or {}).get("reason") or "unspecified") \
+                  if resp.get("status") == "incomplete" else None
+          else:
+              cut_reason = "length" \
+                  if resp.get("choices", [{}])[0].get("finish_reason") == "length" else None
+
           if not text or not text.strip():
-              print(f"::error::seat {seat} ({model}) returned an empty review — failing red (Seats Fail Loud).")
+              why = f" (stopped on {cut_reason} before emitting any text — raise max-output-tokens)" if cut_reason else ""
+              print(f"::error::seat {seat} ({model}) returned an empty review{why} — failing red (Seats Fail Loud).")
               sys.exit(1)
+
+          if cut_reason:
+              print(f"::warning::seat {seat} ({model}) stopped on {cut_reason} at max-output-tokens={max_out}; marking the review incomplete.")
+              text = (
+                  text.rstrip()
+                  + "\n\n> [!WARNING]\n> **REVIEW CUT OFF** — this seat hit its output budget "
+                  + f"({max_out} tokens, stopped on `{cut_reason}`). Findings after this point and the "
+                  + "verdict were not produced; this is a partial review, not a clean one.\n"
+              )
 
           os.makedirs("out", exist_ok=True)
           open("out/section.md", "w", encoding="utf-8").write(text)
@@ -385,7 +422,7 @@ jobs:
                   "pr_number": trusted["pr_number"],
                   "head_sha": trusted["head_sha"],
                   "prompt_pack": pack,
-                  "status": "ok",
+                  "status": "incomplete" if cut_reason else "ok",
                   "review_markdown": text,
               },
               open("out/verdict.json", "w", encoding="utf-8"),
