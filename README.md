@@ -99,9 +99,26 @@ instructions being applied to it — and a prompt change in your repo is a revie
 | `openai-model` | `gpt-5.5` | Model id for the OpenAI seat |
 | `xai-model` | `grok-4.6` | Model id for the xAI seat |
 | `diff-artifact` | `unified-ai-review-diff` | Artifact name from capture |
+| `jev-model` | `jev-latest` | TypeSafe Jev model alias for the typed injection screen |
 
 Secrets: `OPENAI_API_KEY`, `XAI_API_KEY` — mint them restricted (inference only) in dedicated,
-hard-spend-capped vendor projects.
+hard-spend-capped vendor projects. `TYPESAFE_API_KEY` is optional. Pass it to turn on the
+typed injection screen; leave it out and that section reads "not configured", with the run's
+color unchanged.
+
+**The typed injection screen (Jev, trial).** Each window of up to 6,000 characters of the PR's
+*added* lines goes to TypeSafe's Jev as one yes/no question: is this text addressed to an AI
+agent or reviewer? Jev returns a probability, not prose. Text in the PR can nudge that number,
+but it cannot make the screen write a verdict, which is the weakness of a generative seat. A
+window scoring 0.5 or more is reported by file and diff line range; the flagged text is never
+quoted. The screen only adds flags. A clean result clears nothing, and the screen never turns
+the run red; the deterministic screens still do that for invisible Unicode. The added lines
+are public PR text, so sending them to TypeSafe discloses nothing that wasn't already published.
+
+The deterministic screens also flag any **agent-facing file** by path: `SKILL.md`,
+`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.mcp.json`, `.cursorrules`,
+`copilot-instructions.md`, and anything under `.claude/`, `.cursor/` or `.codex/`. A change
+there is a prompt for every future agent session, so it should be reviewed as one.
 
 ## Consuming these reviews
 
