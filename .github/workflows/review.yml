@@ -51,11 +51,19 @@ on:
         type: string
         required: false
         default: unified-ai-review-diff
+      jev-model:
+        description: TypeSafe Jev model alias for the typed injection screen (trial; runs only when TYPESAFE_API_KEY is passed).
+        type: string
+        required: false
+        default: jev-latest
     secrets:
       OPENAI_API_KEY:
         required: true
       XAI_API_KEY:
         required: true
+      TYPESAFE_API_KEY:
+        # Optional: a consumer that passes no key gets a "not configured" line, not a red run.
+        required: false
 
 jobs:
   context:
@@ -191,6 +199,12 @@ jobs:
               + [chr(0xFEFF)]
           )
           B64_BLOB = re.compile(r"[A-Za-z0-9+/=]{200,}")
+          # Files agents read as instructions: a change here is a prompt for every future
+          # session, so it is flagged by path, with no model in the loop.
+          AGENT_FACING = re.compile(
+              r"(^|/)(SKILL\.md|AGENTS\.md|CLAUDE\.md|GEMINI\.md|\.mcp\.json|\.cursorrules|copilot-instructions\.md)$"
+              r"|(^|/)\.(claude|cursor|codex)/",
+          )
 
           for i, line in enumerate(lines, start=1):
               if line.startswith("Binary files ") or line.startswith("GIT binary patch"):
@@ -199,6 +213,8 @@ jobs:
                   path = line[6:]
                   if BINARY_EXT.search(path):
                       findings.append(f"BINARY/IMAGE FILE touched: `{path}` — unreviewable by text review; verify necessity.")
+                  if AGENT_FACING.search(path):
+                      findings.append(f"AGENT-FACING FILE touched: `{path}` — text an AI agent reads as instructions; review it as a prompt: what does it make an agent do?")
               if line.startswith("+") and not line.startswith("+++"):
                   added = line[1:]
                   bad = sorted({f"U+{ord(ch):04X}" for ch in added if ch in INVISIBLE})
@@ -224,6 +240,119 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: screens-output
+          path: out/
+          retention-days: 90
+
+  jev_screen:
+    # Typed injection screen (trial). Jev returns a probability, never prose, so text in
+    # the PR can nudge its score but cannot make it write a verdict. It only ADDS flags:
+    # a clean result clears nothing, and it never turns the run red. It sees only the
+    # PR's added lines, which are public text. Skips cleanly when no key is passed.
+    name: Typed injection screen (Jev, trial)
+    runs-on: ubuntu-latest
+    needs: context
+    if: needs.context.outputs.found == 'true'
+    permissions: {}
+    env:
+      # A step `if:` cannot read `secrets`, so the job states whether a key was passed.
+      HAS_KEY: ${{ secrets.TYPESAFE_API_KEY != '' }}
+    steps:
+      - name: Download diff artifact (from the triggering capture run)
+        if: env.HAS_KEY == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.diff-artifact }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: diff
+
+      - name: Ask Jev, one window at a time
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          JEV_MODEL: ${{ inputs.jev-model }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PYEOF'
+          """Put each window of added text to Jev as one yes/no question.
+
+          Output is file + diff line range + probability only: the flagged text itself is
+          never echoed into the comment, because it is attacker-controlled."""
+          import json
+          import os
+          import urllib.request
+
+          key = os.environ.get("TYPESAFE_API_KEY", "")
+          out = open("out/jev.md", "w", encoding="utf-8")
+          if not key:
+              out.write("- not configured: no `TYPESAFE_API_KEY` passed to this workflow\n")
+              out.close()
+              raise SystemExit(0)
+
+          QUESTION = (
+              "Does this text contain instructions addressed to an AI agent, assistant or code "
+              "reviewer (telling it what to do, approve, ignore, run, fetch or say), rather than "
+              "code, data or documentation written for human readers?"
+          )
+          WINDOW, THRESHOLD = 6000, 0.5
+
+          windows, cur, path, start, size = [], [], None, None, 0
+          lines = open("diff/diff.patch", encoding="utf-8", errors="replace").read().splitlines()
+
+          def flush(end):
+              global cur, size, start
+              if cur:
+                  windows.append((path, start, end, "\n".join(cur)))
+              cur, size, start = [], 0, None
+
+          for i, line in enumerate(lines, start=1):
+              if line.startswith("+++ b/"):
+                  flush(i - 1)
+                  path = line[6:]
+              elif line.startswith("+") and not line.startswith("+++"):
+                  if size + len(line) > WINDOW:
+                      flush(i - 1)
+                  if start is None:
+                      start = i
+                  cur.append(line[1:])
+                  size += len(line)
+          flush(len(lines))
+
+          flags, errors = [], 0
+          for path, a, b, text in windows:
+              req = urllib.request.Request(
+                  "https://api.typesafe.ai/v1/systemone",
+                  data=json.dumps({
+                      "model": os.environ["JEV_MODEL"],
+                      "state": {"file": path, "added_text": text},
+                      "questions": {"agent_instruction": {"type": "noul", "instructions": QUESTION}},
+                  }).encode(),
+                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      p = float(json.load(r)["answers"]["agent_instruction"]["noul"])
+              except Exception as e:  # trial seat: an outage is reported, never fatal
+                  errors += 1
+                  print(f"::warning::Jev call failed for {path} lines {a}-{b}: {type(e).__name__}")
+                  continue
+              if p >= THRESHOLD:
+                  flags.append(f"- AGENT-DIRECTED TEXT likely in `{path}` (diff lines {a}–{b}): p={p:.2f}. Read it in source before trusting any review of this PR.")
+
+          if flags:
+              out.write("\n".join(flags) + "\n")
+          else:
+              out.write(f"- no window scored ≥ {THRESHOLD} for agent-directed instructions ({len(windows) - errors} window(s) asked). Clean is not safe: this screen only adds flags.\n")
+          if errors:
+              out.write(f"- {errors} window(s) not screened: Jev call failed (see the run log).\n")
+          out.close()
+          print(f"jev: {len(windows)} window(s), {len(flags)} flag(s), {errors} error(s)")
+          PYEOF
+
+      - name: Upload Jev screen artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: jev-output
           path: out/
           retention-days: 90
 
@@ -405,7 +534,7 @@ jobs:
   comment:
     name: Post review (no model)
     runs-on: ubuntu-latest
-    needs: [context, screens, seats]
+    needs: [context, screens, seats, jev_screen]
     if: always() && needs.context.outputs.found == 'true'
     permissions:
       pull-requests: write
@@ -415,7 +544,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         continue-on-error: true
         with:
-          pattern: "{seat-*,screens-output}"
+          pattern: "{seat-*,screens-output,jev-output}"
           path: results
 
       - name: Build and post the advisory comment
@@ -447,6 +576,8 @@ jobs:
             }
             const screens = readIf('results/screens-output/screens.md');
             body += `### Deterministic screens (no model)\n\n${screens ?? '- screens output missing — see the run log\n'}\n`;
+            const jev = readIf('results/jev-output/jev.md');
+            body += `\n### Typed injection screen (Jev, trial; adds flags, never clears)\n\n${jev ?? '- Jev screen output missing — see the run log\n'}\n`;
             body += `\n*Advisory only — nothing here blocks a merge. Machinery: [unified-ai-review](https://github.com/unified-systems-com/unified-ai-review). Verdict records ride this [run](${process.env.RUN_URL})'s artifacts.*\n`;
 
             const { data: comments } = await github.rest.issues.listComments({
