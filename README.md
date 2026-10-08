@@ -99,6 +99,7 @@ instructions being applied to it — and a prompt change in your repo is a revie
 | `openai-model` | `gpt-5.5` | Model id for the OpenAI seat |
 | `xai-model` | `grok-4.6` | Model id for the xAI seat |
 | `diff-artifact` | `unified-ai-review-diff` | Artifact name from capture |
+| `max-output-tokens` | `32000` | Output-token budget per seat (1000–128000). Reasoning models spend hidden reasoning tokens from this same budget, so keep it well above the visible review length. A response that stops on the budget is posted with a `REVIEW CUT OFF` warning and `status: incomplete` in `verdict.json` |
 
 Secrets: `OPENAI_API_KEY`, `XAI_API_KEY` — mint them restricted (inference only) in dedicated,
 hard-spend-capped vendor projects.
